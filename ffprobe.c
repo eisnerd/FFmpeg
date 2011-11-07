@@ -30,12 +30,20 @@
 #include "libavdevice/avdevice.h"
 #include "cmdutils.h"
 
+#include <fcntl.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 const char program_name[] = "ffprobe";
 const int program_birth_year = 2007;
+
+static int loud = 1; // !quiet
 
 static int do_show_format  = 0;
 static int do_show_packets = 0;
 static int do_show_streams = 0;
+static int show_codec_only = 0;
 
 static int show_value_unit              = 0;
 static int use_value_prefix             = 0;
@@ -47,7 +55,6 @@ static char *print_format;
 static const OptionDef options[];
 
 /* FFprobe context */
-static const char *input_filename;
 static AVInputFormat *iformat = NULL;
 
 static const char *binary_unit_prefixes [] = { "", "Ki", "Mi", "Gi", "Ti", "Pi" };
@@ -459,12 +466,14 @@ typedef struct {
     int multiple_entries; ///< tells if the given chapter requires multiple entries
     char *buf;
     size_t buf_size;
+    int n;
 } JSONContext;
 
 static av_cold int json_init(WriterContext *wctx, const char *args, void *opaque)
 {
     JSONContext *json = wctx->priv;
 
+    json->n = 0;
     json->buf_size = ESCAPE_INIT_BUF_SIZE;
     if (!(json->buf = av_malloc(json->buf_size)))
         return AVERROR(ENOMEM);
@@ -475,6 +484,7 @@ static av_cold int json_init(WriterContext *wctx, const char *args, void *opaque
 static av_cold void json_uninit(WriterContext *wctx)
 {
     JSONContext *json = wctx->priv;
+    printf("]\n");
     av_freep(&json->buf);
 }
 
@@ -515,12 +525,16 @@ static const char *json_escape_str(char **dst, size_t *dst_size, const char *src
 
 static void json_print_header(WriterContext *wctx)
 {
-    printf("{");
+    JSONContext *json = wctx->priv;
+    if (json->n++)
+        printf(",\n{");
+    else
+        printf("[{");
 }
 
 static void json_print_footer(WriterContext *wctx)
 {
-    printf("\n}\n");
+    printf("\n}");
 }
 
 static void json_print_chapter_header(WriterContext *wctx, const char *chapter)
@@ -571,6 +585,16 @@ static void json_print_str(WriterContext *wctx, const char *key, const char *val
     json_print_item_str(wctx, key, value, INDENT);
 }
 
+static void json_print_some_str(WriterContext *wctx, const char *key, const char *value)
+{
+    //if(!strncmp(key, "codec", 5) || !strncmp(key, "format", 6))
+    int n = strlen(key);
+    if (n > 4 && !strncmp(key+n-4, "name", 4))
+        json_print_str(wctx, key, value);
+    else
+        wctx->nb_item--;
+}
+
 static void json_print_int(WriterContext *wctx, const char *key, int value)
 {
     JSONContext *json = wctx->priv;
@@ -578,6 +602,11 @@ static void json_print_int(WriterContext *wctx, const char *key, int value)
     if (wctx->nb_item) printf(",\n");
     printf(INDENT "\"%s\": %d",
            json_escape_str(&json->buf, &json->buf_size, key, wctx), value);
+}
+
+static void json_print_no_int(WriterContext *wctx, const char *key, int value)
+{
+    wctx->nb_item--;
 }
 
 static void json_show_tags(WriterContext *wctx, AVDictionary *dict)
@@ -593,6 +622,10 @@ static void json_show_tags(WriterContext *wctx, AVDictionary *dict)
         json_print_item_str(wctx, tag->key, tag->value, INDENT INDENT);
     }
     printf("\n    }");
+}
+
+static void json_show_no_tags(WriterContext *wctx, AVDictionary *dict)
+{
 }
 
 static Writer json_writer = {
@@ -612,6 +645,23 @@ static Writer json_writer = {
     .show_tags            = json_show_tags,
 };
 
+static Writer json_brief_writer = {
+    .name         = "json-brief",
+    .priv_size    = sizeof(JSONContext),
+
+    .init                 = json_init,
+    .uninit               = json_uninit,
+    .print_header         = json_print_header,
+    .print_footer         = json_print_footer,
+    .print_chapter_header = json_print_chapter_header,
+    .print_chapter_footer = json_print_chapter_footer,
+    .print_section_header = json_print_section_header,
+    .print_section_footer = json_print_section_footer,
+    .print_integer        = json_print_no_int,
+    .print_string         = json_print_some_str,
+    .show_tags            = json_show_no_tags,
+};
+
 static void writer_register_all(void)
 {
     static int initialized;
@@ -620,6 +670,7 @@ static void writer_register_all(void)
         return;
     initialized = 1;
 
+    writer_register(&json_brief_writer);
     writer_register(&default_writer);
     writer_register(&json_writer);
 }
@@ -815,13 +866,12 @@ static int open_input_file(AVFormatContext **fmt_ctx_ptr, const char *filename)
         return err;
     }
 
-    av_dump_format(fmt_ctx, 0, filename, 0);
+    //av_dump_format(fmt_ctx, 0, filename, 0);
 
     /* bind a decoder to each input stream */
     for (i = 0; i < fmt_ctx->nb_streams; i++) {
         AVStream *stream = fmt_ctx->streams[i];
         AVCodec *codec;
-
         if (!(codec = avcodec_find_decoder(stream->codec->codec_id))) {
             fprintf(stderr, "Unsupported codec with id %d for input stream %d\n",
                     stream->codec->codec_id, stream->index);
@@ -843,47 +893,34 @@ static int open_input_file(AVFormatContext **fmt_ctx_ptr, const char *filename)
     }                                                                   \
 } while (0)
 
-static int probe_file(const char *filename)
+static void probe_file(const char *filename, WriterContext *wctx)
 {
     AVFormatContext *fmt_ctx;
     int ret;
-    Writer *w;
-    char *buf;
-    char *w_name = NULL, *w_args = NULL;
-    WriterContext *wctx;
 
-    writer_register_all();
+    if ((ret = open_input_file(&fmt_ctx, filename))) {
+        if (show_codec_only)
+            printf("\n");
+        return;
+    }
+    if (show_codec_only) {
+      for (int i = 0; i < fmt_ctx->nb_streams; i++) {
+        AVStream *stream = fmt_ctx->streams[i];
+        AVCodecContext *dec_ctx = stream->codec;
+        AVCodec *dec = dec_ctx->codec;
 
-    if (!print_format)
-        print_format = av_strdup("default");
-    w_name = av_strtok(print_format, "=", &buf);
-    w_args = buf;
-
-    w = writer_get_by_name(w_name);
-    if (!w) {
-        av_log(NULL, AV_LOG_ERROR, "Unknown output format with name '%s'\n", w_name);
-        ret = AVERROR(EINVAL);
-        goto end;
+        printf(i?" ":" %s", dec->name);
+      }
+      printf("\n");
+    } else {
+        writer_print_header(wctx);
+        PRINT_CHAPTER(packets);
+        PRINT_CHAPTER(streams);
+        PRINT_CHAPTER(format);
+        writer_print_footer(wctx);
     }
 
-    if ((ret = writer_open(&wctx, w, w_args, NULL)) < 0)
-        goto end;
-    if ((ret = open_input_file(&fmt_ctx, filename)))
-        goto end;
-
-    writer_print_header(wctx);
-    PRINT_CHAPTER(packets);
-    PRINT_CHAPTER(streams);
-    PRINT_CHAPTER(format);
-    writer_print_footer(wctx);
-
     av_close_input_file(fmt_ctx);
-    writer_close(&wctx);
-
-end:
-    av_freep(&print_format);
-
-    return ret;
 }
 
 static void show_usage(void)
@@ -903,16 +940,30 @@ static int opt_format(const char *opt, const char *arg)
     return 0;
 }
 
+static struct str_list {
+    struct str_list *next;
+    const char *s;
+} *input_files = NULL;
+
+static const char *input_files_start = 0;
+
 static void opt_input_file(void *optctx, const char *arg)
 {
-    if (input_filename) {
-        fprintf(stderr, "Argument '%s' provided as input filename, but '%s' was already specified.\n",
-                arg, input_filename);
-        exit(1);
-    }
+    struct str_list *input_file;
+
     if (!strcmp(arg, "-"))
         arg = "pipe:";
-    input_filename = arg;
+
+    input_file = av_malloc(sizeof(struct str_list));
+    input_file->next = input_files;
+    input_file->s = arg;
+    input_files = input_file;
+}
+
+static void opt_final_input_file(void *optctx, const char *arg)
+{
+    if (!input_files_start)
+        input_files_start = arg;
 }
 
 static int opt_help(const char *opt, const char *arg)
@@ -947,10 +998,11 @@ static const OptionDef options[] = {
       "use sexagesimal format HOURS:MM:SS.MICROSECONDS for time units" },
     { "pretty", 0, {(void*)&opt_pretty},
       "prettify the format of displayed values, make it more human readable" },
-    { "print_format", OPT_STRING | HAS_ARG, {(void*)&print_format}, "set the output printing format (available formats are: default, json)", "format" },
+    { "print_format", OPT_STRING | HAS_ARG, {(void*)&print_format}, "set the output printing format (available formats are: default, json, json-brief)", "format" },
     { "show_format",  OPT_BOOL, {(void*)&do_show_format} , "show format/container info" },
     { "show_packets", OPT_BOOL, {(void*)&do_show_packets}, "show packets info" },
     { "show_streams", OPT_BOOL, {(void*)&do_show_streams}, "show streams info" },
+    { "codec", OPT_BOOL, {(void*)&show_codec_only}, "show nothing but the short codec names for all streams" },
     { "default", HAS_ARG | OPT_AUDIO | OPT_VIDEO | OPT_EXPERT, {(void*)opt_default}, "generic catch all option", "" },
     { "i", HAS_ARG, {(void *)opt_input_file}, "read specified file", "input_file"},
     { NULL, },
@@ -959,6 +1011,24 @@ static const OptionDef options[] = {
 int main(int argc, char **argv)
 {
     int ret;
+    struct str_list *to_free;
+    Writer *w;
+    char *buf;
+    char *w_name = NULL, *w_args = NULL;
+    WriterContext *wctx;
+    int i;
+
+    if (argc > 0 && !strncmp(argv[0], "ffprobe-quiet", 13)) {
+#ifdef _WIN32
+	freopen("nul", "w", stderr);
+#else
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd > 0)
+            if (dup2(fd, 2) > 0)
+                close(fd);
+#endif
+        loud = 0;
+    }
 
     parse_loglevel(argc, argv, options);
     av_register_all();
@@ -968,18 +1038,59 @@ int main(int argc, char **argv)
     avdevice_register_all();
 #endif
 
-    show_banner();
-    parse_options(NULL, argc, argv, options, opt_input_file);
+    if (loud)
+        show_banner();
+    parse_options(NULL, argc, argv, options, opt_final_input_file);
 
-    if (!input_filename) {
+    if (!input_files && !input_files_start) {
+      if (loud) {
         show_usage();
         fprintf(stderr, "You have to specify one input file.\n");
         fprintf(stderr, "Use -h to get full help or, even better, run 'man %s'.\n", program_name);
+      }
         exit(1);
     }
 
-    ret = probe_file(input_filename);
+    writer_register_all();
 
+    if (!print_format)
+	print_format = av_strdup("default");
+    w_name = av_strtok(print_format, "=", &buf);
+    w_args = buf;
+
+    w = writer_get_by_name(w_name);
+    if (!w) {
+	av_log(NULL, AV_LOG_ERROR, "Unknown output format with name '%s'\n", w_name);
+	ret = AVERROR(EINVAL);
+	goto end;
+    }
+    if ((ret = writer_open(&wctx, w, w_args, NULL)) < 0)
+	goto end;
+
+    i = 1;
+    if (!input_files_start)
+        i = argc + 1;
+    while (i < argc && input_files_start != argv[i]
+#ifdef _WIN32
+        && strcmp(input_files_start, argv[i])
+#endif
+        ) i++;
+
+    while (input_files || i < argc) {
+        const char *input_filename = input_files?
+            input_files->s : argv[i++];
+        probe_file(input_filename, wctx);
+        if (input_files) {
+            to_free = input_files;
+            input_files = input_files->next;
+            av_free(to_free);
+        }
+    }
+
+    writer_close(&wctx);
+
+    end:
+	av_freep(&print_format);
     avformat_network_deinit();
 
     return ret;
