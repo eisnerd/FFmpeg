@@ -1,0 +1,4 @@
+#!/bin/sh -x
+find . -maxdepth 1 -a -executable -a -type f -a \! -name 'co*' -a \! -name 'opt*' -a \! -name 'ver*' -print0|xargs -0 upx -v
+[ -n "$*" ] &&
+find . -maxdepth 1 -a -executable -a -type f -a \! -name 'co*' -a \! -name 'opt*' -a \! -name 'ver*' -print0|xargs -0 cp -t "$@"

@@ -1,0 +1,3 @@
+git status
+read -p 'build [y]? ' -iy y && [ $y = y ] &&
+./options.linux && make clean && make && ./options.ming && make clean && make && ./compress ~/cygwin/projects/pyArray/Resources/ffmpeg
