@@ -32,6 +32,7 @@
 
 #undef __STRICT_ANSI__ //workaround due to broken kernel headers
 #include "config.h"
+#include "libavformat/internal.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -464,7 +465,7 @@ static int v4l2_set_parameters(AVFormatContext *s1, AVFormatParameters *ap)
     struct v4l2_streamparm streamparm = {0};
     struct v4l2_fract *tpf = &streamparm.parm.capture.timeperframe;
     int i, ret;
-    AVRational framerate_q;
+    AVRational framerate_q={0};
 
     streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
@@ -590,7 +591,7 @@ static int v4l2_read_header(AVFormatContext *s1, AVFormatParameters *ap)
         res = AVERROR(ENOMEM);
         goto out;
     }
-    av_set_pts_info(st, 64, 1, 1000000); /* 64 bits pts in us */
+    avpriv_set_pts_info(st, 64, 1, 1000000); /* 64 bits pts in us */
 
     if (s->video_size && (res = av_parse_video_size(&s->width, &s->height, s->video_size)) < 0) {
         av_log(s1, AV_LOG_ERROR, "Could not parse video size '%s'.\n", s->video_size);
@@ -634,11 +635,11 @@ static int v4l2_read_header(AVFormatContext *s1, AVFormatParameters *ap)
         res = AVERROR(EIO);
         goto out;
     }
-    if ((res = av_image_check_size(s->width, s->height, 0, s1) < 0))
+    if ((res = av_image_check_size(s->width, s->height, 0, s1)) < 0)
         goto out;
     s->frame_format = desired_format;
 
-    if ((res = v4l2_set_parameters(s1, ap) < 0))
+    if ((res = v4l2_set_parameters(s1, ap)) < 0)
         goto out;
 
     st->codec->pix_fmt = fmt_v4l2ff(desired_format, codec_id);
