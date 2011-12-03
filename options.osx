@@ -1,0 +1,1 @@
+./configure --extra-version=ngtech --prefix=dist --enable-avfilter --enable-bzlib --enable-libspeex --enable-libtheora --enable-libvorbis --enable-pthreads --enable-zlib --enable-libvpx --enable-runtime-cpudetect --enable-gpl --enable-postproc --enable-swscale --enable-x11grab --disable-shared --enable-static --enable-small --arch=x86_64
