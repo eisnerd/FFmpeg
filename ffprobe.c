@@ -735,7 +735,8 @@ static av_cold int json_init(WriterContext *wctx, const char *args, void *opaque
 static av_cold void json_uninit(WriterContext *wctx)
 {
     JSONContext *json = wctx->priv;
-    printf("]\n");
+    if (!show_codec_only)
+      printf("]\n");
     av_freep(&json->buf);
 }
 
@@ -824,8 +825,8 @@ static inline void json_print_item_str(WriterContext *wctx,
 {
     JSONContext *json = wctx->priv;
 
-    printf("%s\"%s\":", indent, json_escape_str(&json->buf, &json->buf_size, key,   wctx));
-    printf(" \"%s\"",           json_escape_str(&json->buf, &json->buf_size, value, wctx));
+    printf("%s\"%s\":", indent, json_escape_str(&json->buf, &json->buf_size, key?key:"key",  wctx));
+    printf(" \"%s\"",           json_escape_str(&json->buf, &json->buf_size, value?value:"", wctx));
 }
 
 #define INDENT "    "
@@ -1187,12 +1188,13 @@ static void probe_file(const char *filename, WriterContext *wctx)
         return;
     }
     if (show_codec_only) {
+     if (fmt_ctx)
       for (int i = 0; i < fmt_ctx->nb_streams; i++) {
         AVStream *stream = fmt_ctx->streams[i];
-        AVCodecContext *dec_ctx = stream->codec;
-        AVCodec *dec = dec_ctx->codec;
+        AVCodecContext *dec_ctx = stream?stream->codec:NULL;
+        AVCodec *dec = dec_ctx?dec_ctx->codec:NULL;
 
-        printf(i?" ":" %s", dec->name);
+        printf(i?" %s":"%s", dec?dec->name:"unknown");
       }
       printf("\n");
     } else {
